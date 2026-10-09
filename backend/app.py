@@ -1,0 +1,261 @@
+import os
+import sys
+
+# Ensure root folder is in sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from flask import Flask, jsonify, render_template, request
+from flask_cors import CORS
+
+from algorithms.aco import AntColonyOptimizer
+from algorithms.core_models import DistanceMatrix, Priority, Stop, Vehicle
+from algorithms.cost_function import CostFunction
+from algorithms.ga import GeneticAlgorithmOptimizer
+from backend import database
+
+app = Flask(
+    __name__,
+    template_folder=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "templates")),
+    static_folder=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "static")),
+)
+CORS(app)
+
+# Initialize SQLite database schema and seed data
+database.init_db()
+
+
+def get_current_environment(capacity: float = 400.0, speed_kmh: float = 35.0):
+    stops = database.get_all_stops()
+    vehicle = Vehicle(id=1, capacity=capacity, speed_kmh=speed_kmh)
+    dm = DistanceMatrix(stops)
+
+    # Apply stored road closures
+    closures = database.get_all_closures()
+    for c in closures:
+        dm.close_road(c["from_id"], c["to_id"])
+
+    return stops, vehicle, dm
+
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+@app.route("/api/stops", methods=["GET"])
+def get_stops():
+    stops = database.get_all_stops()
+    return jsonify([s.to_dict() for s in stops])
+
+
+@app.route("/api/stops", methods=["POST"])
+def add_stop():
+    data = request.json or {}
+    try:
+        name = data.get("name", "New Delivery Stop")
+        lat = float(data.get("lat"))
+        lng = float(data.get("lng"))
+        demand = float(data.get("demand", 20.0))
+        tw_start = float(data.get("tw_start", 0.0))
+        tw_end = float(data.get("tw_end", 480.0))
+        service_time = float(data.get("service_time", 10.0))
+        priority = data.get("priority", "NORMAL")
+
+        stop_id = database.add_or_update_stop(
+            name=name,
+            lat=lat,
+            lng=lng,
+            demand=demand,
+            tw_start=tw_start,
+            tw_end=tw_end,
+            service_time=service_time,
+            priority=priority,
+            is_depot=False,
+        )
+        return jsonify({"success": True, "id": stop_id}), 201
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+
+
+@app.route("/api/stops/<int:stop_id>", methods=["DELETE"])
+def delete_stop(stop_id):
+    success = database.delete_stop(stop_id)
+    if success:
+        return jsonify({"success": True})
+    return jsonify({"success": False, "error": "Cannot delete depot or stop not found"}), 400
+
+
+@app.route("/api/reset-scenario", methods=["POST"])
+def reset_scenario():
+    database.seed_sample_stops()
+    # Clear closures
+    conn = database.get_connection()
+    conn.execute("DELETE FROM road_closures")
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True, "message": "Demo scenario reset successfully"})
+
+
+@app.route("/api/closures", methods=["GET"])
+def get_closures():
+    return jsonify(database.get_all_closures())
+
+
+@app.route("/api/closures/toggle", methods=["POST"])
+def toggle_closure():
+    data = request.json or {}
+    from_id = int(data.get("from_id"))
+    to_id = int(data.get("to_id"))
+    is_closed = bool(data.get("is_closed", True))
+    database.toggle_closure(from_id, to_id, is_closed)
+    return jsonify({"success": True, "closures": database.get_all_closures()})
+
+
+@app.route("/api/optimize", methods=["POST"])
+def optimize():
+    data = request.json or {}
+    algo_choice = data.get("algorithm", "aco").lower()
+    capacity = float(data.get("capacity", 400.0))
+    speed = float(data.get("speed", 35.0))
+
+    stops, vehicle, dm = get_current_environment(capacity=capacity, speed_kmh=speed)
+
+    # 1. Evaluate baseline unoptimized route (Sequential ID order: 0 -> 1 -> 2 ... -> 0)
+    naive_route = [0] + [s.id for s in stops if not s.is_depot] + [0]
+    cost_fn = CostFunction(dm, vehicle)
+    baseline_eval = cost_fn.evaluate(naive_route)
+
+    # 2. Run selected algorithm
+    if algo_choice == "ga":
+        pop_size = int(data.get("population_size", 40))
+        generations = int(data.get("generations", 80))
+        optimizer = GeneticAlgorithmOptimizer(
+            stops=stops,
+            vehicle=vehicle,
+            distance_matrix=dm,
+            population_size=pop_size,
+            generations=generations,
+        )
+    else:
+        num_ants = int(data.get("num_ants", 30))
+        iterations = int(data.get("iterations", 80))
+        optimizer = AntColonyOptimizer(
+            stops=stops,
+            vehicle=vehicle,
+            distance_matrix=dm,
+            num_ants=num_ants,
+            iterations=iterations,
+        )
+
+    result = optimizer.optimize()
+    eval_res = result["evaluation"]
+
+    # Calculate distance saved vs baseline
+    dist_saved_km = max(0.0, baseline_eval["distance_km"] - eval_res["distance_km"])
+    pct_saved = (
+        round((dist_saved_km / baseline_eval["distance_km"]) * 100, 1)
+        if baseline_eval["distance_km"] > 0
+        else 0.0
+    )
+
+    # Map stop details in order for frontend display
+    ordered_stops = []
+    for sid in result["route_ids"]:
+        s = dm.stop_map.get(sid)
+        if s:
+            ordered_stops.append(s.to_dict())
+
+    # Record in database
+    database.record_route_run(
+        algorithm=result["algorithm"],
+        route_ids=result["route_ids"],
+        distance_km=eval_res["distance_km"],
+        total_time_min=eval_res["total_time_min"],
+        execution_time_ms=result["execution_time_ms"],
+        cost=eval_res["cost"],
+        is_valid=eval_res["is_valid"],
+        violations=eval_res["violations"],
+    )
+
+    return jsonify({
+        "algorithm": result["algorithm"],
+        "execution_time_ms": result["execution_time_ms"],
+        "route_ids": result["route_ids"],
+        "ordered_stops": ordered_stops,
+        "evaluation": eval_res,
+        "baseline": {
+            "route_ids": naive_route,
+            "distance_km": baseline_eval["distance_km"],
+            "total_time_min": baseline_eval["total_time_min"],
+        },
+        "improvements": {
+            "distance_saved_km": round(dist_saved_km, 2),
+            "percentage_saved": pct_saved,
+        },
+        "convergence_history": result["convergence_history"],
+    })
+
+
+@app.route("/api/compare", methods=["POST"])
+def compare():
+    data = request.json or {}
+    capacity = float(data.get("capacity", 400.0))
+    speed = float(data.get("speed", 35.0))
+
+    stops, vehicle, dm = get_current_environment(capacity=capacity, speed_kmh=speed)
+
+    # Baseline naive route
+    naive_route = [0] + [s.id for s in stops if not s.is_depot] + [0]
+    cost_fn = CostFunction(dm, vehicle)
+    baseline_eval = cost_fn.evaluate(naive_route)
+
+    # Run ACO
+    aco = AntColonyOptimizer(
+        stops=stops,
+        vehicle=vehicle,
+        distance_matrix=dm,
+        num_ants=30,
+        iterations=80,
+    )
+    aco_res = aco.optimize()
+
+    # Run GA
+    ga = GeneticAlgorithmOptimizer(
+        stops=stops,
+        vehicle=vehicle,
+        distance_matrix=dm,
+        population_size=40,
+        generations=80,
+    )
+    ga_res = ga.optimize()
+
+    return jsonify({
+        "baseline": {
+            "distance_km": baseline_eval["distance_km"],
+            "total_time_min": baseline_eval["total_time_min"],
+        },
+        "aco": {
+            "algorithm": aco_res["algorithm"],
+            "execution_time_ms": aco_res["execution_time_ms"],
+            "route_ids": aco_res["route_ids"],
+            "evaluation": aco_res["evaluation"],
+            "convergence": aco_res["convergence_history"],
+        },
+        "ga": {
+            "algorithm": ga_res["algorithm"],
+            "execution_time_ms": ga_res["execution_time_ms"],
+            "route_ids": ga_res["route_ids"],
+            "evaluation": ga_res["evaluation"],
+            "convergence": ga_res["convergence_history"],
+        },
+    })
+
+
+@app.route("/api/analytics", methods=["GET"])
+def get_analytics():
+    return jsonify(database.get_analytics_summary())
+
+
+if __name__ == "__main__":
+    print("Starting AI Delivery Route Optimizer on http://127.0.0.1:5000 ...")
+    app.run(host="127.0.0.1", port=5000, debug=True)

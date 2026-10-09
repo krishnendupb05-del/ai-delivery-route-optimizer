@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI-Based Multi-Constraint Delivery Route Optimizer</title>
+  
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  
+  <!-- FontAwesome -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+  
+  <!-- Custom Styles -->
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <!-- Top Navigation Bar -->
+  <header class="navbar">
+    <div class="nav-brand">
+      <div class="brand-logo">
+        <i class="fa-solid fa-route"></i>
+      </div>
+      <div>
+        <h1 class="brand-title">OptiRoute AI</h1>
+        <p class="brand-subtitle">Multi-Constraint Disruption-Resilient Logistics Engine</p>
+      </div>
+    </div>
+    <div class="nav-actions">
+      <span class="badge badge-accent">CSD.415 Project Phase 1</span>
+      <button id="btnResetScenario" class="btn btn-secondary">
+        <i class="fa-solid fa-rotate-left"></i> Reset Demo Data
+      </button>
+      <button id="btnCompareModal" class="btn btn-outline">
+        <i class="fa-solid fa-code-compare"></i> Compare ACO vs GA
+      </button>
+      <button id="btnOptimize" class="btn btn-primary">
+        <i class="fa-solid fa-bolt"></i> Run Optimization
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="dashboard-grid">
+    <!-- Left Column: Controls, Stops, Closures -->
+    <aside class="sidebar">
+      
+      <!-- Optimization Settings Panel -->
+      <section class="card config-card">
+        <div class="card-header">
+          <h3><i class="fa-solid fa-sliders"></i> Vehicle & Algorithm Parameters</h3>
+        </div>
+        <div class="card-body">
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="algorithmSelect">Algorithm</label>
+              <select id="algorithmSelect" class="input-control">
+                <option value="aco" selected>Ant Colony Optimization (ACO)</option>
+                <option value="ga">Genetic Algorithm (GA)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="vehicleCapacity">Vehicle Capacity (kg)</label>
+              <input type="number" id="vehicleCapacity" class="input-control" value="400" min="50" max="2000">
+            </div>
+            <div class="form-group">
+              <label for="vehicleSpeed">Average Speed (km/h)</label>
+              <input type="number" id="vehicleSpeed" class="input-control" value="35" min="10" max="90">
+            </div>
+            <div class="form-group">
+              <label for="numIterations">Iterations / Ants</label>
+              <input type="number" id="numIterations" class="input-control" value="60" min="10" max="200">
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Dynamic Road Closures Panel -->
+      <section class="card closures-card">
+        <div class="card-header">
+          <h3><i class="fa-solid fa-road-barrier text-danger"></i> Road Closure Simulation</h3>
+          <span class="badge badge-danger" id="closureCountBadge">0 Blocked</span>
+        </div>
+        <div class="card-body">
+          <p class="section-desc">Simulate construction or accidents to trigger live dynamic re-routing:</p>
+          <div class="closure-inputs">
+            <select id="closureFrom" class="input-control"></select>
+            <span>&harr;</span>
+            <select id="closureTo" class="input-control"></select>
+            <button id="btnToggleClosure" class="btn btn-danger btn-sm">
+              <i class="fa-solid fa-ban"></i> Block Road
+            </button>
+          </div>
+          <div id="activeClosuresList" class="tag-list"></div>
+        </div>
+      </section>
+
+      <!-- Delivery Stops Management Panel -->
+      <section class="card stops-card">
+        <div class="card-header flex-between">
+          <h3><i class="fa-solid fa-location-dot"></i> Delivery Stops (<span id="stopCount">0</span>)</h3>
+          <button id="btnOpenAddStop" class="btn btn-sm btn-outline">
+            <i class="fa-solid fa-plus"></i> Add Stop
+          </button>
+        </div>
+        <div class="card-body scrollable-stops">
+          <div id="stopsList" class="stops-container">
+            <!-- Dynamically populated -->
+          </div>
+        </div>
+      </section>
+
+    </aside>
+
+    <!-- Center/Right Column: Interactive Map & Live Analytics -->
+    <section class="workspace">
+      
+      <!-- Key Metric KPI Cards -->
+      <div class="kpi-banner">
+        <div class="kpi-card">
+          <div class="kpi-icon icon-blue"><i class="fa-solid fa-route"></i></div>
+          <div class="kpi-content">
+            <span class="kpi-title">Optimized Distance</span>
+            <span class="kpi-val" id="metricDistance">-- km</span>
+            <span class="kpi-sub text-success" id="metricSaved">--% vs Baseline</span>
+          </div>
+        </div>
+
+        <div class="kpi-card">
+          <div class="kpi-icon icon-green"><i class="fa-solid fa-clock"></i></div>
+          <div class="kpi-content">
+            <span class="kpi-title">Total Travel Time</span>
+            <span class="kpi-val" id="metricTime">-- mins</span>
+            <span class="kpi-sub" id="metricTimelineCount">-- legs</span>
+          </div>
+        </div>
+
+        <div class="kpi-card">
+          <div class="kpi-icon icon-amber"><i class="fa-solid fa-weight-hanging"></i></div>
+          <div class="kpi-content">
+            <span class="kpi-title">Vehicle Load</span>
+            <span class="kpi-val" id="metricCapacity">-- / -- kg</span>
+            <span class="kpi-sub" id="metricCapacityStatus">Within capacity</span>
+          </div>
+        </div>
+
+        <div class="kpi-card">
+          <div class="kpi-icon icon-purple"><i class="fa-solid fa-microchip"></i></div>
+          <div class="kpi-content">
+            <span class="kpi-title">Runtime & Status</span>
+            <span class="kpi-val" id="metricRuntime">-- ms</span>
+            <span class="kpi-sub" id="metricValidity">Ready</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Map & Route View -->
+      <div class="map-wrapper card">
+        <div class="card-header map-header">
+          <div class="map-title-group">
+            <h3><i class="fa-solid fa-map-location-dot"></i> Live Route Map</h3>
+            <span id="routeAlgorithmTag" class="badge badge-accent">ACO Ready</span>
+          </div>
+          <div class="map-legend">
+            <span class="legend-item"><span class="dot dot-depot"></span> Depot</span>
+            <span class="legend-item"><span class="dot dot-critical"></span> Critical</span>
+            <span class="legend-item"><span class="dot dot-high"></span> High</span>
+            <span class="legend-item"><span class="dot dot-normal"></span> Normal</span>
+            <span class="legend-item"><span class="dot dot-low"></span> Low</span>
+          </div>
+        </div>
+        <div id="map" class="map-container"></div>
+      </div>
+
+      <!-- Bottom Panel: Convergence Graph & Sequence Details -->
+      <div class="bottom-panels">
+        <!-- Convergence Chart -->
+        <div class="card chart-card">
+          <div class="card-header">
+            <h3><i class="fa-solid fa-chart-line"></i> Optimization Convergence Curve</h3>
+          </div>
+          <div class="card-body">
+            <canvas id="convergenceChart"></canvas>
+          </div>
+        </div>
+
+        <!-- Stop Sequence & Timeline Table -->
+        <div class="card table-card">
+          <div class="card-header">
+            <h3><i class="fa-solid fa-list-ol"></i> Sequence Timeline</h3>
+          </div>
+          <div class="card-body table-responsive">
+            <table class="data-table" id="timelineTable">
+              <thead>
+                <tr>
+                  <th>Seq</th>
+                  <th>Stop Name</th>
+                  <th>Priority</th>
+                  <th>Arrival</th>
+                  <th>Window</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="timelineBody">
+                <tr><td colspan="6" class="text-center text-muted">Run optimization to view stop timeline</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+    </section>
+  </main>
+
+  <!-- Add Stop Modal -->
+  <div id="addStopModal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-plus-circle"></i> Add Delivery Stop</h3>
+        <button id="btnCloseModal" class="btn-close">&times;</button>
+      </div>
+      <form id="addStopForm">
+        <div class="modal-body">
+          <div class="form-group">
+            <label>Stop Name / Customer</label>
+            <input type="text" id="newStopName" class="input-control" placeholder="e.g. Chengannur Medical Center" required>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Latitude</label>
+              <input type="number" step="0.0001" id="newStopLat" class="input-control" value="9.3200" required>
+            </div>
+            <div class="form-group">
+              <label>Longitude</label>
+              <input type="number" step="0.0001" id="newStopLng" class="input-control" value="76.6200" required>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Demand Weight (kg)</label>
+              <input type="number" id="newStopDemand" class="input-control" value="25" min="1" required>
+            </div>
+            <div class="form-group">
+              <label>Priority</label>
+              <select id="newStopPriority" class="input-control">
+                <option value="CRITICAL">Critical (Life-saving/Urgent)</option>
+                <option value="HIGH">High (Perishables)</option>
+                <option value="NORMAL" selected>Normal</option>
+                <option value="LOW">Low</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Window Start (min)</label>
+              <input type="number" id="newStopTwStart" class="input-control" value="30" min="0" required>
+            </div>
+            <div class="form-group">
+              <label>Window End (min)</label>
+              <input type="number" id="newStopTwEnd" class="input-control" value="180" min="1" required>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" id="btnCancelModal" class="btn btn-secondary">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save Stop</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Comparison Modal -->
+  <div id="compareModal" class="modal-overlay hidden">
+    <div class="modal-card modal-lg">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-code-compare"></i> Comparative Benchmarking: ACO vs Genetic Algorithm</h3>
+        <button id="btnCloseCompareModal" class="btn-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="compare-stats-grid">
+          <div class="stat-box aco-box">
+            <h4>Ant Colony Optimization</h4>
+            <div class="stat-row"><span>Best Distance:</span> <strong id="cmpAcoDist">-- km</strong></div>
+            <div class="stat-row"><span>Total Time:</span> <strong id="cmpAcoTime">-- mins</strong></div>
+            <div class="stat-row"><span>Execution Time:</span> <strong id="cmpAcoExec">-- ms</strong></div>
+            <div class="stat-row"><span>Violations:</span> <strong id="cmpAcoViolations">0</strong></div>
+          </div>
+          <div class="stat-box ga-box">
+            <h4>Genetic Algorithm</h4>
+            <div class="stat-row"><span>Best Distance:</span> <strong id="cmpGaDist">-- km</strong></div>
+            <div class="stat-row"><span>Total Time:</span> <strong id="cmpGaTime">-- mins</strong></div>
+            <div class="stat-row"><span>Execution Time:</span> <strong id="cmpGaExec">-- ms</strong></div>
+            <div class="stat-row"><span>Violations:</span> <strong id="cmpGaViolations">0</strong></div>
+          </div>
+        </div>
+        <div class="compare-chart-wrapper">
+          <canvas id="compareConvergenceChart"></canvas>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btnRunComparisonBench" class="btn btn-primary">
+          <i class="fa-solid fa-play"></i> Re-Run Benchmark
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
