@@ -4,6 +4,7 @@ import sqlite3
 from typing import Any, Dict, List, Optional
 from algorithms.core_models import Priority, Stop
 from algorithms.sample_data import get_sample_scenario
+from backend.models import SCHEMA_SQL, VehicleConfigModel, StopModel, RouteRecordModel, RoadClosureModel
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "optimizer.db")
 
@@ -18,56 +19,20 @@ def init_db():
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Stops table
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS stops (
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            lat REAL NOT NULL,
-            lng REAL NOT NULL,
-            demand REAL NOT NULL DEFAULT 0.0,
-            tw_start REAL NOT NULL DEFAULT 0.0,
-            tw_end REAL NOT NULL DEFAULT 480.0,
-            service_time REAL NOT NULL DEFAULT 10.0,
-            priority TEXT NOT NULL DEFAULT 'NORMAL',
-            is_depot INTEGER NOT NULL DEFAULT 0
-        )
-        """
-    )
-
-    # Routes history table
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS routes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            algorithm TEXT NOT NULL,
-            route_ids TEXT NOT NULL,
-            distance_km REAL NOT NULL,
-            total_time_min REAL NOT NULL,
-            execution_time_ms REAL NOT NULL,
-            cost REAL NOT NULL,
-            is_valid INTEGER NOT NULL DEFAULT 1,
-            violations TEXT NOT NULL DEFAULT '[]'
-        )
-        """
-    )
-
-    # Road closures table
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS road_closures (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            from_id INTEGER NOT NULL,
-            to_id INTEGER NOT NULL,
-            is_closed INTEGER NOT NULL DEFAULT 1,
-            UNIQUE(from_id, to_id)
-        )
-        """
-    )
-
+    # Execute normalized schema
+    cursor.executescript(SCHEMA_SQL)
     conn.commit()
+
+    # Seed initial vehicle configuration if empty
+    cursor.execute("SELECT COUNT(*) as cnt FROM vehicle_configs")
+    if cursor.fetchone()["cnt"] == 0:
+        cursor.execute(
+            """
+            INSERT INTO vehicle_configs (id, name, capacity, speed_kmh, depot_stop_id, max_shift_duration_min, is_active)
+            VALUES (1, 'Primary Electric Delivery Van', 400.0, 35.0, 0, 480.0, 1)
+            """
+        )
+        conn.commit()
 
     # Seed initial stops if empty
     cursor.execute("SELECT COUNT(*) as cnt FROM stops")
@@ -180,7 +145,6 @@ def delete_stop(stop_id: int) -> bool:
     cursor = conn.cursor()
     cursor.execute("DELETE FROM stops WHERE id = ?", (stop_id,))
     deleted = cursor.rowcount > 0
-    # Also clean up road closures involving this stop
     cursor.execute("DELETE FROM road_closures WHERE from_id = ? OR to_id = ?", (stop_id, stop_id))
     conn.commit()
     conn.close()
@@ -289,3 +253,53 @@ def get_analytics_summary() -> dict:
         "success_rate_percent": success_rate,
         "recent_history": recent_routes,
     }
+
+
+def get_active_vehicle_config() -> VehicleConfigModel:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM vehicle_configs WHERE is_active = 1 ORDER BY id ASC LIMIT 1")
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return VehicleConfigModel.from_row(row)
+    return VehicleConfigModel()
+
+
+def update_vehicle_config(
+    capacity: float,
+    speed_kmh: float,
+    name: str = "Primary Electric Delivery Van",
+    depot_stop_id: int = 0,
+    max_shift_duration_min: float = 480.0,
+) -> VehicleConfigModel:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        UPDATE vehicle_configs
+        SET name = ?, capacity = ?, speed_kmh = ?, depot_stop_id = ?, max_shift_duration_min = ?
+        WHERE id = 1
+        """,
+        (name, float(capacity), float(speed_kmh), int(depot_stop_id), float(max_shift_duration_min)),
+    )
+    if cursor.rowcount == 0:
+        cursor.execute(
+            """
+            INSERT INTO vehicle_configs (id, name, capacity, speed_kmh, depot_stop_id, max_shift_duration_min, is_active)
+            VALUES (1, ?, ?, ?, ?, ?, 1)
+            """,
+            (name, float(capacity), float(speed_kmh), int(depot_stop_id), float(max_shift_duration_min)),
+        )
+    conn.commit()
+    conn.close()
+    return get_active_vehicle_config()
+
+
+def get_total_stops_demand() -> float:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COALESCE(SUM(demand), 0.0) as total_demand FROM stops WHERE is_depot = 0")
+    total = cursor.fetchone()["total_demand"]
+    conn.close()
+    return float(total)

@@ -1,5 +1,6 @@
 import os
 import sys
+from typing import Any, Dict, List, Optional
 
 # Ensure root folder is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -12,6 +13,8 @@ from algorithms.core_models import DistanceMatrix, Priority, Stop, Vehicle
 from algorithms.cost_function import CostFunction
 from algorithms.ga import GeneticAlgorithmOptimizer
 from backend import database
+from backend.disruption import DisruptionEngine
+from backend.models import StopModel, VehicleConfigModel
 
 app = Flask(
     __name__,
@@ -24,9 +27,13 @@ CORS(app)
 database.init_db()
 
 
-def get_current_environment(capacity: float = 400.0, speed_kmh: float = 35.0):
+def get_current_environment(capacity: Optional[float] = None, speed_kmh: Optional[float] = None):
+    v_config = database.get_active_vehicle_config()
+    eff_capacity = capacity if capacity is not None else v_config.capacity
+    eff_speed = speed_kmh if speed_kmh is not None else v_config.speed_kmh
+
     stops = database.get_all_stops()
-    vehicle = Vehicle(id=1, capacity=capacity, speed_kmh=speed_kmh)
+    vehicle = Vehicle(id=v_config.id, capacity=eff_capacity, speed_kmh=eff_speed)
     dm = DistanceMatrix(stops)
 
     # Apply stored road closures
@@ -61,6 +68,23 @@ def add_stop():
         service_time = float(data.get("service_time", 10.0))
         priority = data.get("priority", "NORMAL")
 
+        # Validate input bounds
+        stop_model = StopModel(
+            id=0,
+            name=name,
+            lat=lat,
+            lng=lng,
+            demand=demand,
+            tw_start=tw_start,
+            tw_end=tw_end,
+            service_time=service_time,
+            priority=priority,
+            is_depot=False,
+        )
+        is_valid, err_msg = stop_model.validate()
+        if not is_valid:
+            return jsonify({"success": False, "error": err_msg}), 422
+
         stop_id = database.add_or_update_stop(
             name=name,
             lat=lat,
@@ -88,7 +112,6 @@ def delete_stop(stop_id):
 @app.route("/api/reset-scenario", methods=["POST"])
 def reset_scenario():
     database.seed_sample_stops()
-    # Clear closures
     conn = database.get_connection()
     conn.execute("DELETE FROM road_closures")
     conn.commit()
@@ -120,6 +143,20 @@ def optimize():
 
     stops, vehicle, dm = get_current_environment(capacity=capacity, speed_kmh=speed)
 
+    # Input Validation: Check total delivery load against vehicle capacity before dispatch
+    total_demand = sum(s.demand for s in stops if not s.is_depot)
+    v_config = database.get_active_vehicle_config()
+    v_config.capacity = capacity
+    is_cap_valid, cap_err = v_config.validate_capacity(total_demand)
+    if not is_cap_valid and data.get("enforce_capacity", True):
+        return jsonify({
+            "success": False,
+            "error": "Capacity Overload",
+            "message": cap_err,
+            "total_demand": round(total_demand, 2),
+            "vehicle_capacity": round(vehicle.capacity, 2),
+        }), 422
+
     # 1. Evaluate baseline unoptimized route (Sequential ID order: 0 -> 1 -> 2 ... -> 0)
     naive_route = [0] + [s.id for s in stops if not s.is_depot] + [0]
     cost_fn = CostFunction(dm, vehicle)
@@ -150,7 +187,6 @@ def optimize():
     result = optimizer.optimize()
     eval_res = result["evaluation"]
 
-    # Calculate distance saved vs baseline
     dist_saved_km = max(0.0, baseline_eval["distance_km"] - eval_res["distance_km"])
     pct_saved = (
         round((dist_saved_km / baseline_eval["distance_km"]) * 100, 1)
@@ -158,7 +194,6 @@ def optimize():
         else 0.0
     )
 
-    # Map stop details in order for frontend display
     ordered_stops = []
     for sid in result["route_ids"]:
         s = dm.stop_map.get(sid)
@@ -196,6 +231,47 @@ def optimize():
     })
 
 
+@app.route("/api/reroute", methods=["POST"])
+def reroute():
+    data = request.json or {}
+    current_route = data.get("current_route", [])
+    from_id = data.get("from_id")
+    to_id = data.get("to_id")
+    algorithm = data.get("algorithm", "aco").lower()
+
+    if not current_route:
+        return jsonify({"success": False, "error": "'current_route' list is required"}), 400
+
+    disrupted_edge = None
+    if from_id is not None and to_id is not None:
+        disrupted_edge = (int(from_id), int(to_id))
+        database.toggle_closure(disrupted_edge[0], disrupted_edge[1], is_closed=True)
+
+    engine = DisruptionEngine()
+    result = engine.rapid_reroute(
+        current_route=current_route,
+        disrupted_edge=disrupted_edge,
+        algorithm=algorithm,
+    )
+    return jsonify(result)
+
+
+@app.route("/api/vehicle", methods=["GET"])
+def get_vehicle_config():
+    v = database.get_active_vehicle_config()
+    return jsonify(v.to_dict())
+
+
+@app.route("/api/vehicle", methods=["POST"])
+def update_vehicle():
+    data = request.json or {}
+    capacity = float(data.get("capacity", 400.0))
+    speed = float(data.get("speed_kmh", data.get("speed", 35.0)))
+    name = data.get("name", "Primary Electric Delivery Van")
+    v = database.update_vehicle_config(capacity=capacity, speed_kmh=speed, name=name)
+    return jsonify({"success": True, "vehicle": v.to_dict()})
+
+
 @app.route("/api/compare", methods=["POST"])
 def compare():
     data = request.json or {}
@@ -204,12 +280,10 @@ def compare():
 
     stops, vehicle, dm = get_current_environment(capacity=capacity, speed_kmh=speed)
 
-    # Baseline naive route
     naive_route = [0] + [s.id for s in stops if not s.is_depot] + [0]
     cost_fn = CostFunction(dm, vehicle)
     baseline_eval = cost_fn.evaluate(naive_route)
 
-    # Run ACO
     aco = AntColonyOptimizer(
         stops=stops,
         vehicle=vehicle,
@@ -219,7 +293,6 @@ def compare():
     )
     aco_res = aco.optimize()
 
-    # Run GA
     ga = GeneticAlgorithmOptimizer(
         stops=stops,
         vehicle=vehicle,
