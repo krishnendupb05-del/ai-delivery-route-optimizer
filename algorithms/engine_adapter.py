@@ -47,7 +47,6 @@ def build_problem(
     for stop in delivery_stops:
         start, end = stop.time_window
 
-        
         engine_stop = EngineStop(
             id=stop.id,
             name=stop.name,
@@ -108,9 +107,17 @@ def optimize(
     population_size: int = 40,
     generations: int = 80,
     seed: int | None = None,
+    warm_start: list[int] | None = None,
 ) -> dict:
     """Run the new engine and return results mapped to legacy stop IDs."""
     problem, legacy_ids = build_problem(stops, vehicle, distance_matrix)
+
+    warm_order = None
+    if warm_start is not None:
+        id_to_idx = {sid: i for i, sid in enumerate(legacy_ids)}
+        filtered = [id_to_idx[sid] for sid in warm_start if sid in id_to_idx]
+        if len(filtered) == len(legacy_ids) and len(set(filtered)) == len(legacy_ids):
+            warm_order = filtered
 
     if algorithm.lower() == "ga":
         result = ga.run(
@@ -120,6 +127,7 @@ def optimize(
                 generations=max(1, generations),
             ),
             seed=seed,
+            warm_start=warm_order,
         )
         algorithm_name = "GA"
     else:
@@ -130,6 +138,7 @@ def optimize(
                 iterations=max(1, iterations),
             ),
             seed=seed,
+            warm_start=warm_order,
         )
         algorithm_name = "ACO"
 

@@ -11,11 +11,11 @@ from flask_cors import CORS
 from algorithms.aco import AntColonyOptimizer
 from algorithms.core_models import DistanceMatrix, Priority, Stop, Vehicle
 from algorithms.cost_function import CostFunction
+from algorithms.engine_adapter import optimize as run_engine_optimization
 from algorithms.ga import GeneticAlgorithmOptimizer
 from backend import database
 from backend.disruption import DisruptionEngine
 from backend.models import StopModel, VehicleConfigModel
-from algorithms.engine_adapter import optimize as run_engine_optimization
 
 app = Flask(
     __name__,
@@ -163,7 +163,6 @@ def optimize():
     cost_fn = CostFunction(dm, vehicle)
     baseline_eval = cost_fn.evaluate(naive_route)
 
-    
     # 2. Run selected algorithm using the new engine adapter
     result = run_engine_optimization(
         stops=stops,
@@ -176,7 +175,7 @@ def optimize():
         generations=int(data.get("generations", 80)),
     )
 
-        # Restore the depot at the start and end of the route
+    # Restore the depot at the start and end of the route
     depot_id = next(s.id for s in stops if s.is_depot)
     result["route_ids"] = [
         depot_id,
@@ -193,7 +192,6 @@ def optimize():
         if algo_choice == "ga"
         else "Ant Colony Optimization (ACO)"
     )
-
 
     dist_saved_km = max(0.0, baseline_eval["distance_km"] - eval_res["distance_km"])
     pct_saved = (
@@ -291,24 +289,31 @@ def compare():
     naive_route = [0] + [s.id for s in stops if not s.is_depot] + [0]
     cost_fn = CostFunction(dm, vehicle)
     baseline_eval = cost_fn.evaluate(naive_route)
+    depot_id = next(s.id for s in stops if s.is_depot)
 
-    aco = AntColonyOptimizer(
+    # Run ACO using Person 1's new algorithm engine
+    aco_res = run_engine_optimization(
         stops=stops,
         vehicle=vehicle,
         distance_matrix=dm,
-        num_ants=30,
-        iterations=80,
+        algorithm="aco",
+        num_ants=int(data.get("num_ants", 30)),
+        iterations=int(data.get("iterations", 80)),
     )
-    aco_res = aco.optimize()
+    aco_route = [depot_id, *aco_res["route_ids"], depot_id]
+    aco_eval = cost_fn.evaluate(aco_route)
 
-    ga = GeneticAlgorithmOptimizer(
+    # Run GA using Person 1's new algorithm engine
+    ga_res = run_engine_optimization(
         stops=stops,
         vehicle=vehicle,
         distance_matrix=dm,
-        population_size=40,
-        generations=80,
+        algorithm="ga",
+        population_size=int(data.get("population_size", 40)),
+        generations=int(data.get("generations", 80)),
     )
-    ga_res = ga.optimize()
+    ga_route = [depot_id, *ga_res["route_ids"], depot_id]
+    ga_eval = cost_fn.evaluate(ga_route)
 
     return jsonify({
         "baseline": {
@@ -316,17 +321,17 @@ def compare():
             "total_time_min": baseline_eval["total_time_min"],
         },
         "aco": {
-            "algorithm": aco_res["algorithm"],
+            "algorithm": "Ant Colony Optimization (ACO)",
             "execution_time_ms": aco_res["execution_time_ms"],
-            "route_ids": aco_res["route_ids"],
-            "evaluation": aco_res["evaluation"],
+            "route_ids": aco_route,
+            "evaluation": aco_eval,
             "convergence": aco_res["convergence_history"],
         },
         "ga": {
-            "algorithm": ga_res["algorithm"],
+            "algorithm": "Genetic Algorithm (GA)",
             "execution_time_ms": ga_res["execution_time_ms"],
-            "route_ids": ga_res["route_ids"],
-            "evaluation": ga_res["evaluation"],
+            "route_ids": ga_route,
+            "evaluation": ga_eval,
             "convergence": ga_res["convergence_history"],
         },
     })

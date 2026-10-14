@@ -92,38 +92,52 @@ class DisruptionEngine:
                 "time_delta_min": 0.0,
             }
 
-        # Warm-start optimization
-        fast_iterations = 25
-        fast_ants = 20
+        # Warm-start rapid re-routing
+        try:
+            from algorithms.engine_adapter import optimize as run_engine_optimization
 
-        optimizer = AntColonyOptimizer(
-            stops=self.stops,
-            vehicle=self.vehicle,
-            distance_matrix=self.dm,
-            num_ants=fast_ants,
-            iterations=fast_iterations,
-            random_seed=int(time.time()),
-        )
+            opt_result = run_engine_optimization(
+                stops=self.stops,
+                vehicle=self.vehicle,
+                distance_matrix=self.dm,
+                algorithm=algorithm,
+                num_ants=20,
+                iterations=25,
+                warm_start=current_route,
+            )
+            depot_id = next(s.id for s in self.stops if s.is_depot)
+            new_route_ids = [depot_id, *opt_result["route_ids"], depot_id]
+            new_eval = cost_fn.evaluate(new_route_ids)
+            convergence = opt_result["convergence_history"]
+        except Exception:
+            # Robust fallback to legacy ACO solver
+            optimizer = AntColonyOptimizer(
+                stops=self.stops,
+                vehicle=self.vehicle,
+                distance_matrix=self.dm,
+                num_ants=20,
+                iterations=25,
+                random_seed=int(time.time()),
+            )
+            for i in range(len(current_route) - 1):
+                p1, p2 = current_route[i], current_route[i + 1]
+                if not self.dm.is_edge_closed(p1, p2):
+                    optimizer.pheromones[(p1, p2)] = 3.5
+                    optimizer.pheromones[(p2, p1)] = 3.5
+                else:
+                    optimizer.pheromones[(p1, p2)] = 0.0001
+                    optimizer.pheromones[(p2, p1)] = 0.0001
+            legacy_res = optimizer.optimize()
+            new_route_ids = legacy_res["route_ids"]
+            new_eval = legacy_res["evaluation"]
+            convergence = legacy_res["convergence_history"]
 
-        # WARM-START: Prime pheromones from intact segments of the previous route
-        for i in range(len(current_route) - 1):
-            p1, p2 = current_route[i], current_route[i + 1]
-            if not self.dm.is_edge_closed(p1, p2):
-                optimizer.pheromones[(p1, p2)] = 3.5
-                optimizer.pheromones[(p2, p1)] = 3.5
-            else:
-                optimizer.pheromones[(p1, p2)] = 0.0001
-                optimizer.pheromones[(p2, p1)] = 0.0001
-
-        opt_result = optimizer.optimize()
         exec_ms = round((time.perf_counter() - start_time) * 1000, 2)
-        new_eval = opt_result["evaluation"]
-
         dist_delta = round(new_eval["distance_km"] - prior_eval["distance_km"], 2)
         time_delta = round(new_eval["total_time_min"] - prior_eval["total_time_min"], 2)
 
         ordered_stops = []
-        for sid in opt_result["route_ids"]:
+        for sid in new_route_ids:
             s = self.dm.stop_map.get(sid)
             if s:
                 ordered_stops.append(s.to_dict())
@@ -131,7 +145,7 @@ class DisruptionEngine:
         # Persist re-routed result to SQLite
         database.record_route_run(
             algorithm="ACO-Dynamic-Reroute",
-            route_ids=opt_result["route_ids"],
+            route_ids=new_route_ids,
             distance_km=new_eval["distance_km"],
             total_time_min=new_eval["total_time_min"],
             execution_time_ms=exec_ms,
@@ -144,12 +158,12 @@ class DisruptionEngine:
             "reroute_needed": True,
             "algorithm": "ACO-Dynamic-Reroute",
             "execution_time_ms": exec_ms,
-            "route_ids": opt_result["route_ids"],
+            "route_ids": new_route_ids,
             "ordered_stops": ordered_stops,
             "evaluation": new_eval,
             "prior_route": current_route,
             "distance_delta_km": dist_delta,
             "time_delta_min": time_delta,
-            "convergence_history": opt_result["convergence_history"],
+            "convergence_history": convergence,
             "disrupted_edge": list(disrupted_edge) if disrupted_edge else None,
         }
