@@ -32,3 +32,8 @@ Desktop.ini
 
 # Logs
 *.log
+
+# Backups
+*.bak
+*.backup
+*.before_*

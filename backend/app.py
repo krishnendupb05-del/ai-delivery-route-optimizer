@@ -15,6 +15,7 @@ from algorithms.ga import GeneticAlgorithmOptimizer
 from backend import database
 from backend.disruption import DisruptionEngine
 from backend.models import StopModel, VehicleConfigModel
+from algorithms.engine_adapter import optimize as run_engine_optimization
 
 app = Flask(
     __name__,
@@ -162,30 +163,37 @@ def optimize():
     cost_fn = CostFunction(dm, vehicle)
     baseline_eval = cost_fn.evaluate(naive_route)
 
-    # 2. Run selected algorithm
-    if algo_choice == "ga":
-        pop_size = int(data.get("population_size", 40))
-        generations = int(data.get("generations", 80))
-        optimizer = GeneticAlgorithmOptimizer(
-            stops=stops,
-            vehicle=vehicle,
-            distance_matrix=dm,
-            population_size=pop_size,
-            generations=generations,
-        )
-    else:
-        num_ants = int(data.get("num_ants", 30))
-        iterations = int(data.get("iterations", 80))
-        optimizer = AntColonyOptimizer(
-            stops=stops,
-            vehicle=vehicle,
-            distance_matrix=dm,
-            num_ants=num_ants,
-            iterations=iterations,
-        )
+    
+    # 2. Run selected algorithm using the new engine adapter
+    result = run_engine_optimization(
+        stops=stops,
+        vehicle=vehicle,
+        distance_matrix=dm,
+        algorithm=algo_choice,
+        num_ants=int(data.get("num_ants", 30)),
+        iterations=int(data.get("iterations", 80)),
+        population_size=int(data.get("population_size", 40)),
+        generations=int(data.get("generations", 80)),
+    )
 
-    result = optimizer.optimize()
-    eval_res = result["evaluation"]
+        # Restore the depot at the start and end of the route
+    depot_id = next(s.id for s in stops if s.is_depot)
+    result["route_ids"] = [
+        depot_id,
+        *result["route_ids"],
+        depot_id,
+    ]
+
+    # Use the existing evaluator to preserve the frontend's expected fields
+    eval_res = cost_fn.evaluate(result["route_ids"])
+
+    # Preserve the algorithm names used by the existing frontend
+    result["algorithm"] = (
+        "Genetic Algorithm (GA)"
+        if algo_choice == "ga"
+        else "Ant Colony Optimization (ACO)"
+    )
+
 
     dist_saved_km = max(0.0, baseline_eval["distance_km"] - eval_res["distance_km"])
     pct_saved = (
