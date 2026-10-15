@@ -7,7 +7,7 @@ def get_sample_scenario() -> dict:
     Returns realistic initial dataset for demonstration.
     Centered around Chengannur & central Kerala logistics route.
     """
-    vehicle = Vehicle(id=1, capacity=400.0, speed_kmh=35.0)
+    vehicle = Vehicle(id=1, capacity=80.0, speed_kmh=35.0)
 
     stops = [
         # Depot (ID 0)
@@ -28,7 +28,7 @@ def get_sample_scenario() -> dict:
             name="Taluk Hospital Medical Store",
             lat=9.3240,
             lng=76.6210,
-            demand=20.0,
+            demand=15.0,
             time_window=(15.0, 90.0),
             service_time=12.0,
             priority=Priority.CRITICAL,
@@ -39,7 +39,7 @@ def get_sample_scenario() -> dict:
             name="Kozhencherry Life Care Pharmacy",
             lat=9.3402,
             lng=76.6998,
-            demand=35.0,
+            demand=25.0,
             time_window=(30.0, 160.0),
             service_time=15.0,
             priority=Priority.HIGH,
@@ -50,7 +50,7 @@ def get_sample_scenario() -> dict:
             name="Pandalam Central Mart",
             lat=9.2312,
             lng=76.6806,
-            demand=45.0,
+            demand=30.0,
             time_window=(60.0, 240.0),
             service_time=10.0,
             priority=Priority.NORMAL,
@@ -61,7 +61,7 @@ def get_sample_scenario() -> dict:
             name="Thiruvalla Commercial Hub",
             lat=9.3842,
             lng=76.5750,
-            demand=50.0,
+            demand=35.0,
             time_window=(60.0, 300.0),
             service_time=15.0,
             priority=Priority.NORMAL,
@@ -83,7 +83,7 @@ def get_sample_scenario() -> dict:
             name="Haripad Hardware & Supplies",
             lat=9.2850,
             lng=76.4520,
-            demand=40.0,
+            demand=20.0,
             time_window=(90.0, 380.0),
             service_time=15.0,
             priority=Priority.LOW,
@@ -105,7 +105,7 @@ def get_sample_scenario() -> dict:
             name="Adoor Healthcare Center",
             lat=9.1530,
             lng=76.7340,
-            demand=30.0,
+            demand=20.0,
             time_window=(45.0, 180.0),
             service_time=15.0,
             priority=Priority.HIGH,

@@ -56,14 +56,25 @@ class CostFunction:
         violations = []
         timeline = []
 
-        # Check total load
+        # Check multi-trip load: reset load at each depot reload visit (stop 0)
+        current_trip_load = 0.0
+        max_trip_load = 0.0
+        excess_load = 0.0
         for sid in route_ids:
-            if sid != 0 and sid in self.dm.stop_map:
-                total_load += self.dm.stop_map[sid].demand
+            if sid == 0:
+                current_trip_load = 0.0
+            elif sid in self.dm.stop_map:
+                demand = self.dm.stop_map[sid].demand
+                total_load += demand
+                current_trip_load += demand
+                max_trip_load = max(max_trip_load, current_trip_load)
+                if current_trip_load > self.vehicle.capacity:
+                    excess_load = max(excess_load, current_trip_load - self.vehicle.capacity)
 
-        excess_load = max(0.0, total_load - self.vehicle.capacity)
         if excess_load > 0:
-            violations.append(f"Load {total_load:.1f}kg exceeds vehicle capacity {self.vehicle.capacity:.1f}kg by {excess_load:.1f}kg")
+            violations.append(
+                f"Trip load {max_trip_load:.1f}kg exceeds vehicle capacity {self.vehicle.capacity:.1f}kg by {excess_load:.1f}kg"
+            )
 
         # Traverse route
         for i in range(len(route_ids) - 1):

@@ -31,9 +31,8 @@ function initMap() {
   // Centered on Chengannur / Central Kerala
   map = L.map('map').setView([9.3175, 76.6174], 11);
 
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-    attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
-    subdomains: 'abcd',
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
     maxZoom: 19,
   }).addTo(map);
 }
@@ -70,6 +69,12 @@ async function loadStops() {
   try {
     const res = await fetch('/api/stops');
     allStops = await res.json();
+    if (!Array.isArray(allStops) || allStops.length === 0) {
+      console.warn('No stops found in database, auto-seeding demo scenario...');
+      await fetch('/api/reset-scenario', { method: 'POST' });
+      const retryRes = await fetch('/api/stops');
+      allStops = await retryRes.json();
+    }
     renderStopsList();
     renderMarkers();
     populateClosureDropdowns();
@@ -267,34 +272,57 @@ async function deleteStop(stopId) {
 
 // Add Closure
 async function handleAddClosure() {
-  const fromId = parseInt(document.getElementById('closureFrom').value);
-  const toId = parseInt(document.getElementById('closureTo').value);
+  const fromSel = document.getElementById('closureFrom');
+  const toSel = document.getElementById('closureTo');
+  if (!fromSel || !toSel) return;
+  const fromId = parseInt(fromSel.value);
+  const toId = parseInt(toSel.value);
 
-  if (fromId === toId) {
+  if (isNaN(fromId) || isNaN(toId) || fromId === toId) {
     alert('Please select two different stops to mark a closed segment.');
     return;
   }
 
-  await fetch('/api/closures/toggle', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ from_id: fromId, to_id: toId, is_closed: true }),
-  });
+  const btn = document.getElementById('btnToggleClosure');
+  const origText = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Blocking...';
 
-  await loadClosures();
-  // Automatically trigger dynamic re-optimization
-  runOptimization();
+  try {
+    const res = await fetch('/api/closures/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from_id: fromId, to_id: toId, is_closed: true }),
+    });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.message || errData.error || 'Failed to toggle closure');
+    }
+    await loadClosures();
+    // Automatically trigger dynamic re-optimization
+    await runOptimization();
+  } catch (err) {
+    alert('Failed to simulate road closure: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = origText;
+  }
 }
 
 // Remove Closure
 async function removeClosure(fromId, toId) {
-  await fetch('/api/closures/toggle', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ from_id: fromId, to_id: toId, is_closed: false }),
-  });
-  await loadClosures();
-  runOptimization();
+  try {
+    const res = await fetch('/api/closures/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from_id: fromId, to_id: toId, is_closed: false }),
+    });
+    if (!res.ok) throw new Error('Failed to remove closure');
+    await loadClosures();
+    await runOptimization();
+  } catch (err) {
+    alert('Failed to remove closure: ' + err.message);
+  }
 }
 
 // Reset Scenario
@@ -311,6 +339,11 @@ async function runOptimization() {
   const btn = document.getElementById('btnOptimize');
   btn.disabled = true;
   btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Optimizing...';
+
+  if (!allStops || allStops.length === 0) {
+    await fetch('/api/reset-scenario', { method: 'POST' });
+    await loadStops();
+  }
 
   const algo = document.getElementById('algorithmSelect').value;
   const capacity = parseFloat(document.getElementById('vehicleCapacity').value);
@@ -334,6 +367,11 @@ async function runOptimization() {
     });
     const data = await res.json();
 
+    if (!res.ok || data.error) {
+      alert('Optimization Notice: ' + (data.message || data.error || 'Server error'));
+      return;
+    }
+
     updateKPIs(data);
     drawOptimizedRoute(data);
     updateTimelineTable(data);
@@ -348,16 +386,28 @@ async function runOptimization() {
 
 // Update KPI Cards
 function updateKPIs(data) {
-  const evalData = data.evaluation;
+  const evalData = data.evaluation || {};
+  const numTrips = data.num_trips || (evalData.num_trips || 1);
+  const depotReturns = data.depot_returns !== undefined ? data.depot_returns : (evalData.depot_returns || 0);
+
+  const tripsElem = document.getElementById('metricTrips');
+  if (tripsElem) {
+    tripsElem.textContent = `${numTrips} ${numTrips === 1 ? 'Trip' : 'Trips'}`;
+  }
+  const reloadsElem = document.getElementById('metricDepotReturns');
+  if (reloadsElem) {
+    reloadsElem.textContent = depotReturns > 0 ? `${depotReturns} Depot ${depotReturns === 1 ? 'Reload' : 'Reloads'}` : 'Single Direct Leg';
+  }
+
   document.getElementById('metricDistance').textContent = `${evalData.distance_km} km`;
   document.getElementById('metricSaved').textContent = `${data.improvements.percentage_saved}% saved vs baseline`;
   document.getElementById('metricTime').textContent = `${evalData.total_time_min} mins`;
-  document.getElementById('metricTimelineCount').textContent = `${data.route_ids.length - 1} route legs`;
+  document.getElementById('metricTimelineCount').textContent = `${(data.route_ids || []).length - 1} route legs`;
   document.getElementById('metricCapacity').textContent = `${evalData.capacity_used} / ${evalData.capacity_limit} kg`;
   
   const capStatus = document.getElementById('metricCapacityStatus');
-  if (evalData.capacity_used <= evalData.capacity_limit) {
-    capStatus.textContent = 'Within capacity';
+  if (evalData.capacity_used <= evalData.capacity_limit || numTrips > 1) {
+    capStatus.textContent = numTrips > 1 ? `${numTrips} Trips (Reloaded at Depot)` : 'Within capacity';
     capStatus.className = 'kpi-sub text-success';
   } else {
     capStatus.textContent = 'Capacity exceeded!';
@@ -370,7 +420,7 @@ function updateKPIs(data) {
     valStatus.textContent = 'Valid (0 Violations)';
     valStatus.className = 'kpi-sub text-success';
   } else {
-    valStatus.textContent = `${evalData.violations.length} Violation(s)`;
+    valStatus.textContent = `${(evalData.violations || []).length} Violation(s)`;
     valStatus.className = 'kpi-sub text-danger';
   }
 
@@ -403,25 +453,52 @@ function updateTimelineTable(data) {
   const tbody = document.getElementById('timelineBody');
   tbody.innerHTML = '';
 
-  const timeline = data.evaluation.timeline || [];
+  const timeline = (data.evaluation && data.evaluation.timeline) ? data.evaluation.timeline : [];
+  if (timeline.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No route timeline available</td></tr>';
+    return;
+  }
+
   const stopsMap = {};
   allStops.forEach((s) => (stopsMap[s.id] = s));
 
+  let currentTrip = 1;
+
   timeline.forEach((leg, index) => {
-    const stop = stopsMap[leg.to_id] || { name: 'Unknown', priority: 'NORMAL', time_window: [0, 0] };
+    // If previous leg ended at depot (to_id === 0) and this leg goes to a customer stop, increment trip counter
+    if (index > 0 && timeline[index - 1].to_id === 0 && leg.to_id !== 0) {
+      currentTrip++;
+    }
+
+    const isDepot = leg.to_id === 0;
+    const isLastLeg = index === timeline.length - 1;
+    const stop = stopsMap[leg.to_id] || (isDepot ? { name: 'Central Depot Hub', priority: 'DEPOT', time_window: [0, 480] } : { name: 'Unknown', priority: 'NORMAL', time_window: [0, 0] });
     const tr = document.createElement('tr');
 
     const isLate = leg.lateness > 0;
-    const statusBadge = isLate
-      ? `<span class="badge badge-danger">Late +${leg.lateness}m</span>`
-      : `<span class="badge badge-accent">On Time</span>`;
+    const statusBadge = isDepot
+      ? `<span class="badge badge-accent">${isLastLeg ? 'Final Return' : '🔄 Reload'}</span>`
+      : (isLate
+        ? `<span class="badge badge-danger">Late +${leg.lateness}m</span>`
+        : `<span class="badge badge-accent">On Time</span>`);
+
+    const stopDisplay = isDepot
+      ? (isLastLeg ? '<i class="fa-solid fa-flag-checkered text-primary"></i> Central Depot (Route End)' : '<i class="fa-solid fa-rotate text-warning"></i> Central Depot (Reload)')
+      : `${stop.name} (Stop #${leg.to_id})`;
+
+    const priorityBadge = isDepot
+      ? `<span class="badge badge-outline" style="border:1px solid #3b82f6; color:#38bdf8;">Depot</span>`
+      : `<span class="stop-badge prio-${stop.priority}">${stop.priority}</span>`;
+
+    const windowDisplay = isDepot ? 'Shift Hours' : `[${stop.time_window[0]} - ${stop.time_window[1]}]`;
 
     tr.innerHTML = `
+      <td><span class="badge badge-accent">Trip #${currentTrip}</span></td>
       <td><strong>#${index + 1}</strong></td>
-      <td>${stop.name} (Stop #${leg.to_id})</td>
-      <td><span class="stop-badge prio-${stop.priority}">${stop.priority}</span></td>
+      <td>${stopDisplay}</td>
+      <td>${priorityBadge}</td>
       <td><strong>${leg.arrival_time} min</strong></td>
-      <td>[${stop.time_window[0]} - ${stop.time_window[1]}]</td>
+      <td>${windowDisplay}</td>
       <td>${statusBadge}</td>
     `;
     tbody.appendChild(tr);
@@ -476,11 +553,11 @@ function initConvergenceChart() {
 }
 
 function updateConvergenceChart(history, algoName) {
-  if (!convergenceChart || !history) return;
+  if (!convergenceChart || !history || !history.length) return;
 
-  const labels = history.map((h) => h.iteration);
-  const costs = history.map((h) => h.best_cost);
-  const distances = history.map((h) => h.best_distance);
+  const labels = history.map((h, i) => (typeof h === 'object' && h !== null ? h.iteration : i + 1));
+  const costs = history.map((h) => (typeof h === 'object' && h !== null ? h.best_cost : h));
+  const distances = history.map((h) => (typeof h === 'object' && h !== null ? (h.best_distance || h.best_cost) : h));
 
   convergenceChart.data.labels = labels;
   convergenceChart.data.datasets[0].label = `${algoName} Best Cost`;
@@ -511,6 +588,11 @@ async function runComparisonBenchmark() {
     });
     const data = await res.json();
 
+    if (!res.ok || data.error) {
+      alert('Benchmark notice: ' + (data.message || data.error || 'Server error'));
+      return;
+    }
+
     // ACO stats
     document.getElementById('cmpAcoDist').textContent = `${data.aco.evaluation.distance_km} km`;
     document.getElementById('cmpAcoTime').textContent = `${data.aco.evaluation.total_time_min} mins`;
@@ -538,9 +620,13 @@ function renderComparisonChart(acoConv, gaConv) {
     compareChart.destroy();
   }
 
-  const labels = acoConv.map((c) => c.iteration);
-  const acoCosts = acoConv.map((c) => c.best_cost);
-  const gaCosts = gaConv.map((c) => c.best_cost);
+  const acoList = acoConv || [];
+  const gaList = gaConv || [];
+  const maxLen = Math.max(acoList.length, gaList.length);
+  const labels = Array.from({ length: maxLen }, (_, i) => i + 1);
+
+  const acoCosts = acoList.map((c) => (typeof c === 'object' && c !== null ? c.best_cost : c));
+  const gaCosts = gaList.map((c) => (typeof c === 'object' && c !== null ? c.best_cost : c));
 
   compareChart = new Chart(ctx, {
     type: 'line',

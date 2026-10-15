@@ -143,7 +143,30 @@ def optimize(
         algorithm_name = "ACO"
 
     evaluation = result.evaluation
-    route_ids = [legacy_ids[i] for i in result.order]
+    depot_id = next(s.id for s in stops if s.is_depot)
+    delivery_stops = [s for s in stops if not s.is_depot]
+    node_to_legacy = {0: depot_id}
+    node_to_legacy.update({i + 1: s.id for i, s in enumerate(delivery_stops)})
+
+    # Map full driving sequence with depot reloads (multi-trip vehicle routing)
+    if evaluation.node_sequence:
+        full_route = [node_to_legacy[n] for n in evaluation.node_sequence]
+    else:
+        full_route = [depot_id, *[legacy_ids[i] for i in result.order], depot_id]
+
+    # Partition full route into distinct vehicle trips
+    trips = []
+    if full_route:
+        curr_trip = [full_route[0]]
+        for sid in full_route[1:]:
+            curr_trip.append(sid)
+            if sid == depot_id:
+                trips.append(curr_trip)
+                curr_trip = [depot_id]
+        if len(curr_trip) > 1:
+            trips.append(curr_trip)
+
+    num_trips = max(1, len(trips))
 
     violations = []
     if evaluation.late_stops:
@@ -153,10 +176,25 @@ def optimize(
     if evaluation.closed_edges_used:
         violations.append(f"{evaluation.closed_edges_used} closed road segment(s) used")
 
+    # Format convergence history into structured points expected by the UI charts
+    history_formatted = []
+    for idx, item in enumerate(result.history):
+        if isinstance(item, dict):
+            history_formatted.append(item)
+        else:
+            history_formatted.append({
+                "iteration": idx + 1,
+                "best_cost": round(float(item), 2),
+                "best_distance": round(evaluation.total_distance, 2),
+            })
+
     return {
         "algorithm": algorithm_name,
         "execution_time_ms": result.elapsed_seconds * 1000.0,
-        "route_ids": route_ids,
+        "route_ids": full_route,
+        "num_trips": num_trips,
+        "depot_returns": evaluation.depot_returns,
+        "trips": trips,
         "evaluation": {
             "distance_km": evaluation.total_distance,
             "total_time_min": evaluation.total_time,
@@ -165,8 +203,9 @@ def optimize(
             "violations": violations,
             "late_stops": evaluation.late_stops,
             "depot_returns": evaluation.depot_returns,
+            "num_trips": num_trips,
             "excess_weight": evaluation.excess_weight,
             "closed_edges_used": evaluation.closed_edges_used,
         },
-        "convergence_history": result.history,
+        "convergence_history": history_formatted,
     }

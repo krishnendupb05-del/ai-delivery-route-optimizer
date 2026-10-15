@@ -139,17 +139,42 @@ def toggle_closure():
 def optimize():
     data = request.json or {}
     algo_choice = data.get("algorithm", "aco").lower()
-    capacity = float(data.get("capacity", 400.0))
+    raw_capacity = float(data.get("capacity", 80.0))
+    capacity = max(40.0, min(100.0, raw_capacity))
     speed = float(data.get("speed", 35.0))
 
     stops, vehicle, dm = get_current_environment(capacity=capacity, speed_kmh=speed)
 
-    # Input Validation: Check total delivery load against vehicle capacity before dispatch
+    # Safety check: ensure stops exist, auto-seed if empty
+    delivery_stops = [s for s in stops if not s.is_depot]
+    if not stops or len(delivery_stops) == 0:
+        database.seed_sample_stops()
+        stops, vehicle, dm = get_current_environment(capacity=capacity, speed_kmh=speed)
+        delivery_stops = [s for s in stops if not s.is_depot]
+        if not stops or len(delivery_stops) == 0:
+            return jsonify({
+                "success": False,
+                "error": "No Delivery Stops",
+                "message": "No delivery stops found. Please click 'Reset Demo Data' to load sample stops.",
+            }), 400
+
+    # Input Validation: Check if any single stop's package exceeds vehicle capacity
+    max_single_demand = max((s.demand for s in stops if not s.is_depot), default=0.0)
+    if max_single_demand > capacity:
+        return jsonify({
+            "success": False,
+            "error": "Package Exceeds Capacity",
+            "message": f"Stop package weight ({max_single_demand:.1f} kg) exceeds vehicle carrying capacity ({capacity:.1f} kg). Reduce package weight or increase capacity.",
+            "max_single_demand": round(max_single_demand, 2),
+            "vehicle_capacity": round(capacity, 2),
+        }), 422
+
+    # Total demand exceeding capacity triggers multi-trip dispatch (returns to depot to reload).
     total_demand = sum(s.demand for s in stops if not s.is_depot)
     v_config = database.get_active_vehicle_config()
     v_config.capacity = capacity
     is_cap_valid, cap_err = v_config.validate_capacity(total_demand)
-    if not is_cap_valid and data.get("enforce_capacity", True):
+    if not is_cap_valid and data.get("enforce_single_trip", False):
         return jsonify({
             "success": False,
             "error": "Capacity Overload",
@@ -175,16 +200,19 @@ def optimize():
         generations=int(data.get("generations", 80)),
     )
 
-    # Restore the depot at the start and end of the route
     depot_id = next(s.id for s in stops if s.is_depot)
-    result["route_ids"] = [
-        depot_id,
-        *result["route_ids"],
-        depot_id,
-    ]
+    route_ids = result.get("route_ids", [])
+    if not route_ids or route_ids[0] != depot_id:
+        route_ids = [depot_id] + route_ids
+    if route_ids[-1] != depot_id:
+        route_ids = route_ids + [depot_id]
+    result["route_ids"] = route_ids
 
     # Use the existing evaluator to preserve the frontend's expected fields
     eval_res = cost_fn.evaluate(result["route_ids"])
+    eval_res["num_trips"] = result.get("num_trips", 1)
+    eval_res["depot_returns"] = result.get("depot_returns", 0)
+    eval_res["trips"] = result.get("trips", [])
 
     # Preserve the algorithm names used by the existing frontend
     result["algorithm"] = (
@@ -222,6 +250,9 @@ def optimize():
         "algorithm": result["algorithm"],
         "execution_time_ms": result["execution_time_ms"],
         "route_ids": result["route_ids"],
+        "num_trips": result.get("num_trips", 1),
+        "depot_returns": result.get("depot_returns", 0),
+        "trips": result.get("trips", []),
         "ordered_stops": ordered_stops,
         "evaluation": eval_res,
         "baseline": {
@@ -281,10 +312,24 @@ def update_vehicle():
 @app.route("/api/compare", methods=["POST"])
 def compare():
     data = request.json or {}
-    capacity = float(data.get("capacity", 400.0))
+    raw_capacity = float(data.get("capacity", 80.0))
+    capacity = max(40.0, min(100.0, raw_capacity))
     speed = float(data.get("speed", 35.0))
 
     stops, vehicle, dm = get_current_environment(capacity=capacity, speed_kmh=speed)
+
+    # Safety check: ensure stops exist, auto-seed if empty
+    delivery_stops = [s for s in stops if not s.is_depot]
+    if not stops or len(delivery_stops) == 0:
+        database.seed_sample_stops()
+        stops, vehicle, dm = get_current_environment(capacity=capacity, speed_kmh=speed)
+        delivery_stops = [s for s in stops if not s.is_depot]
+        if not stops or len(delivery_stops) == 0:
+            return jsonify({
+                "success": False,
+                "error": "No Delivery Stops",
+                "message": "No delivery stops found. Please click 'Reset Demo Data' to load sample stops.",
+            }), 400
 
     naive_route = [0] + [s.id for s in stops if not s.is_depot] + [0]
     cost_fn = CostFunction(dm, vehicle)
@@ -300,8 +345,10 @@ def compare():
         num_ants=int(data.get("num_ants", 30)),
         iterations=int(data.get("iterations", 80)),
     )
-    aco_route = [depot_id, *aco_res["route_ids"], depot_id]
+    aco_route = aco_res["route_ids"]
     aco_eval = cost_fn.evaluate(aco_route)
+    aco_eval["num_trips"] = aco_res.get("num_trips", 1)
+    aco_eval["trips"] = aco_res.get("trips", [])
 
     # Run GA using Person 1's new algorithm engine
     ga_res = run_engine_optimization(
@@ -312,8 +359,10 @@ def compare():
         population_size=int(data.get("population_size", 40)),
         generations=int(data.get("generations", 80)),
     )
-    ga_route = [depot_id, *ga_res["route_ids"], depot_id]
+    ga_route = ga_res["route_ids"]
     ga_eval = cost_fn.evaluate(ga_route)
+    ga_eval["num_trips"] = ga_res.get("num_trips", 1)
+    ga_eval["trips"] = ga_res.get("trips", [])
 
     return jsonify({
         "baseline": {
@@ -324,6 +373,8 @@ def compare():
             "algorithm": "Ant Colony Optimization (ACO)",
             "execution_time_ms": aco_res["execution_time_ms"],
             "route_ids": aco_route,
+            "num_trips": aco_res.get("num_trips", 1),
+            "trips": aco_res.get("trips", []),
             "evaluation": aco_eval,
             "convergence": aco_res["convergence_history"],
         },
@@ -331,6 +382,8 @@ def compare():
             "algorithm": "Genetic Algorithm (GA)",
             "execution_time_ms": ga_res["execution_time_ms"],
             "route_ids": ga_route,
+            "num_trips": ga_res.get("num_trips", 1),
+            "trips": ga_res.get("trips", []),
             "evaluation": ga_eval,
             "convergence": ga_res["convergence_history"],
         },

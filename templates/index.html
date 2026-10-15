@@ -65,8 +65,8 @@
               </select>
             </div>
             <div class="form-group">
-              <label for="vehicleCapacity">Vehicle Capacity (kg)</label>
-              <input type="number" id="vehicleCapacity" class="input-control" value="400" min="50" max="2000">
+              <label for="vehicleCapacity">Vehicle Capacity (40 - 100 kg)</label>
+              <input type="number" id="vehicleCapacity" class="input-control" value="80" min="40" max="100">
             </div>
             <div class="form-group">
               <label for="vehicleSpeed">Average Speed (km/h)</label>
@@ -122,6 +122,15 @@
       
       <!-- Key Metric KPI Cards -->
       <div class="kpi-banner">
+        <div class="kpi-card">
+          <div class="kpi-icon icon-teal"><i class="fa-solid fa-truck-fast"></i></div>
+          <div class="kpi-content">
+            <span class="kpi-title">Scheduled Trips</span>
+            <span class="kpi-val" id="metricTrips">-- Trips</span>
+            <span class="kpi-sub text-accent" id="metricDepotReturns">-- Reloads</span>
+          </div>
+        </div>
+
         <div class="kpi-card">
           <div class="kpi-icon icon-blue"><i class="fa-solid fa-route"></i></div>
           <div class="kpi-content">
@@ -198,6 +207,7 @@
             <table class="data-table" id="timelineTable">
               <thead>
                 <tr>
+                  <th>Trip</th>
                   <th>Seq</th>
                   <th>Stop Name</th>
                   <th>Priority</th>
@@ -207,7 +217,7 @@
                 </tr>
               </thead>
               <tbody id="timelineBody">
-                <tr><td colspan="6" class="text-center text-muted">Run optimization to view stop timeline</td></tr>
+                <tr><td colspan="7" class="text-center text-muted">Run optimization to view stop timeline</td></tr>
               </tbody>
             </table>
           </div>
@@ -313,6 +323,6 @@
   <!-- Scripts -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <script src="/static/js/app.js"></script>
+  <script src="/static/js/app.js?v=4"></script>
 </body>
 </html>

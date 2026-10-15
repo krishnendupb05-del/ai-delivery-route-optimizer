@@ -29,7 +29,7 @@ def init_db():
         cursor.execute(
             """
             INSERT INTO vehicle_configs (id, name, capacity, speed_kmh, depot_stop_id, max_shift_duration_min, is_active)
-            VALUES (1, 'Primary Electric Delivery Van', 400.0, 35.0, 0, 480.0, 1)
+            VALUES (1, 'Primary Electric Delivery Van', 80.0, 35.0, 0, 480.0, 1)
             """
         )
         conn.commit()
@@ -77,6 +77,14 @@ def get_all_stops() -> List[Stop]:
     cursor.execute("SELECT * FROM stops ORDER BY id ASC")
     rows = cursor.fetchall()
     conn.close()
+
+    if not rows:
+        seed_sample_stops()
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM stops ORDER BY id ASC")
+        rows = cursor.fetchall()
+        conn.close()
 
     stops = []
     for r in rows:
